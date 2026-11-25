@@ -37,6 +37,63 @@ import dashboardHtml from './dashboard.html';
    Flip `configured: true` per source as you wire it. Until then the
    dashboard honestly shows "not configured" (never a fake zero).
 ---------------------------------------------------------------------------- */
+/* ---------------- Xero helpers (accounting adapter) ---------------- */
+const XERO_WAGE_RE = /wages|salaries|superannuation|\bsuper\b|payroll|annual leave|long service|workcover/i;
+
+async function xeroTenant(h) {
+  const t = await h.getTokens();
+  if (t && t.tenantId) return { id: t.tenantId, name: t.tenantName || '' };
+  const conns = await h.fetchJson('https://api.xero.com/connections', { headers: { Accept: 'application/json' } });
+  if (!Array.isArray(conns) || !conns.length) { const e = new Error('no organisation'); e.status = 403; throw e; }
+  const c = conns[0];
+  const t2 = (await h.getTokens()) || {};
+  await h.saveTokens({ ...t2, tenantId: c.tenantId, tenantName: c.tenantName || '' });
+  return { id: c.tenantId, name: c.tenantName || '' };
+}
+function xeroPL(h, tenantId, from, to, extra) {
+  const p = new URLSearchParams({ fromDate: from, toDate: to, standardLayout: 'true', ...(extra || {}) });
+  return h.fetchJson('https://api.xero.com/api.xro/2.0/Reports/ProfitAndLoss?' + p.toString(), {
+    headers: { 'Xero-Tenant-Id': tenantId, Accept: 'application/json' }
+  });
+}
+function plNum(cells, i) {
+  const v = cells && cells[i] && cells[i].Value;
+  const n = parseFloat(String(v === undefined || v === null ? '' : v).replace(/,/g, ''));
+  return isFinite(n) ? n : 0;
+}
+/* Walk the P&L sections faithfully. Columns: Cells[0] = label, Cells[1..] = periods (newest first). */
+function parsePL(report, ncols) {
+  const zero = () => new Array(ncols).fill(0);
+  const out = { revenue: zero(), cogs: zero(), wages: zero(), opex: zero() };
+  const rows = (report && report.Reports && report.Reports[0] && report.Reports[0].Rows) || [];
+  for (const sec of rows) {
+    if (sec.RowType !== 'Section' || !sec.Title) continue;
+    const title = sec.Title;
+    if (/other income/i.test(title)) continue; /* trading income only */
+    let kind = null;
+    if (/cost of (sales|goods)|direct cost/i.test(title)) kind = 'cogs';
+    else if (/operating expense|^\s*expenses\s*$/i.test(title)) kind = 'opex';
+    else if (/income|revenue|sales/i.test(title)) kind = 'revenue';
+    if (!kind) continue;
+    const inner = sec.Rows || [];
+    const summary = inner.find((r) => r.RowType === 'SummaryRow');
+    for (let c = 0; c < ncols; c++) {
+      const total = summary
+        ? plNum(summary.Cells, c + 1)
+        : inner.filter((r) => r.RowType === 'Row').reduce((s, r) => s + plNum(r.Cells, c + 1), 0);
+      out[kind][c] += total;
+      if (kind === 'opex') {
+        for (const r of inner) {
+          const label = (r.RowType === 'Row' && r.Cells && r.Cells[0] && r.Cells[0].Value) || '';
+          if (label && XERO_WAGE_RE.test(label)) out.wages[c] += plNum(r.Cells, c + 1);
+        }
+      }
+    }
+  }
+  return out;
+}
+function cents(x) { return Math.round(x * 100) / 100; }
+
 /* OPTIONAL no-API hooks any adapter may add (the fallback-ladder rungs):
      mode: 'export'           - source is fed by exports, not a live API
      parseExport(env, h, raw) - raw = { text, contentType }: parse the tool's
@@ -79,22 +136,59 @@ const ADAPTERS = {
      'Demo Company'. Secrets: ACCOUNTING_CLIENT_ID, ACCOUNTING_CLIENT_SECRET.
   */
   accounting: {
-    configured: false,
-    auth: null, /* 'oauth' | 'token' */
+    configured: true,
+    auth: 'oauth',
     oauth: {
-      /* Example (Xero) - fill these when you wire the adapter:
-         authorizeUrl: 'https://login.xero.com/identity/connect/authorize',
-         tokenUrl: 'https://identity.xero.com/connect/token',
-         scopes: 'offline_access accounting.reports.profitandloss.read',
-         clientIdSecret: 'ACCOUNTING_CLIENT_ID',
-         clientSecretSecret: 'ACCOUNTING_CLIENT_SECRET',
-         tokenAuth: 'basic'   // Xero's token endpoint wants HTTP Basic client auth
-                              // (client_secret_basic). Use 'post' only for providers
-                              // that expect client_id/secret in the form body. */
+      authorizeUrl: 'https://login.xero.com/identity/connect/authorize',
+      tokenUrl: 'https://identity.xero.com/connect/token',
+      scopes: 'offline_access accounting.reports.profitandloss.read',
+      clientIdSecret: 'ACCOUNTING_CLIENT_ID',
+      clientSecretSecret: 'ACCOUNTING_CLIENT_SECRET',
+      tokenAuth: 'basic'
     },
-    async status(env, h) { return { connected: false }; },
-    async fetchRange(env, h, q) { throw new NotConfigured('accounting'); },
-    async fetchMonthly(env, h, q) { throw new NotConfigured('accounting'); }
+    async status(env, h) {
+      const t = await h.getTokens();
+      if (!t || !t.access_token) return { connected: false };
+      const org = await xeroTenant(h);
+      return { connected: true, org: org.name, sandbox: /demo company/i.test(org.name || ''), lastSync: null };
+    },
+    async fetchRange(env, h, q) {
+      const t = await xeroTenant(h);
+      const rep = await xeroPL(h, t.id, q.from, q.to, {});
+      const p = parsePL(rep, 1);
+      return {
+        revenue: cents(p.revenue[0]),
+        cogs: cents(p.cogs[0]),
+        wagesSuper: cents(p.wages[0]),
+        overheads: cents(p.opex[0] - p.wages[0])
+      };
+    },
+    async fetchMonthly(env, h, q) {
+      const t = await xeroTenant(h);
+      const months = monthList(q.fromMonth, q.toMonth);
+      const byMonth = {};
+      for (let end = months.length; end > 0; end -= 12) { /* Xero caps periods at 12 per call */
+        const chunk = months.slice(Math.max(0, end - 12), end);
+        const last = chunk[chunk.length - 1];
+        const [y, m] = last.split('-').map(Number);
+        const ld = new Date(Date.UTC(y, m, 0)).getUTCDate();
+        const rep = await xeroPL(h, t.id, last + '-01', last + '-' + String(ld).padStart(2, '0'),
+          { timeframe: 'MONTH', periods: String(chunk.length - 1) });
+        const p = parsePL(rep, chunk.length);
+        chunk.slice().reverse().forEach((mo, i) => {
+          byMonth[mo] = { revenue: p.revenue[i], cogs: p.cogs[i], wagesSuper: p.wages[i], overheads: p.opex[i] - p.wages[i] };
+        });
+      }
+      const res = { months: months, revenue: [], cogs: [], wagesSuper: [], overheads: [] };
+      months.forEach((mo) => {
+        const b = byMonth[mo];
+        res.revenue.push(b ? cents(b.revenue) : null);
+        res.cogs.push(b ? cents(b.cogs) : null);
+        res.wagesSuper.push(b ? cents(b.wagesSuper) : null);
+        res.overheads.push(b ? cents(b.overheads) : null);
+      });
+      return res;
+    }
   },
 
   /* >>> ADAPTER 2: POS
