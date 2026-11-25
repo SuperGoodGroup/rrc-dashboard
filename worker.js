@@ -38,7 +38,10 @@ import dashboardHtml from './dashboard.html';
    dashboard honestly shows "not configured" (never a fake zero).
 ---------------------------------------------------------------------------- */
 /* ---------------- Xero helpers (accounting adapter) ---------------- */
-const XERO_WAGE_RE = /wages|salaries|superannuation|\bsuper\b|payroll|annual leave|long service|workcover/i;
+/* The owner's confirmed wage + super accounts, matched by exact name (case and spacing ignored).
+   Anything not listed here stays in Overheads. Edit this list if the owner's chart changes. */
+const XERO_WAGE_ACCOUNTS = ['Wages Rocky Creek', 'Superannuation Rocky Creek'];
+const XERO_WAGE_SET = new Set(XERO_WAGE_ACCOUNTS.map(function (n) { return n.toLowerCase().replace(/\s+/g, ' ').trim(); }));
 
 async function xeroTenant(h) {
   const t = await h.getTokens();
@@ -85,7 +88,7 @@ function parsePL(report, ncols) {
       if (kind === 'opex') {
         for (const r of inner) {
           const label = (r.RowType === 'Row' && r.Cells && r.Cells[0] && r.Cells[0].Value) || '';
-          if (label && XERO_WAGE_RE.test(label)) out.wages[c] += plNum(r.Cells, c + 1);
+          if (label && XERO_WAGE_SET.has(String(label).toLowerCase().replace(/\s+/g, ' ').trim())) out.wages[c] += plNum(r.Cells, c + 1);
         }
       }
     }
