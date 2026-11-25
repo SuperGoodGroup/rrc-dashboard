@@ -347,7 +347,7 @@ function rangeKey(from, to) { return iso(from) + '_' + iso(to); }
 var P = KIT_CONFIG.providers;
 var METRIC_DEFS = {
   revenue:      { label: 'Revenue', fmt: 'money', needs: ['accounting'], goodDir: 'up', benchmark: true,
-                  def: 'All trading income, ' + KIT_CONFIG.taxLabel + ' · from ' + P.accounting,
+                  def: 'Sales Rocky Creek line only, ' + KIT_CONFIG.taxLabel + ' · from ' + P.accounting + ' · differs from the standard definition (all trading income)',
                   decision: 'Is the top line growing? Sets the base every other number is judged against.' },
   transactions: { label: 'Number of transactions', fmt: 'int', needs: ['pos'], goodDir: 'up',
                   def: 'Completed transactions, voids and refunds excluded · from ' + P.pos,
@@ -356,7 +356,7 @@ var METRIC_DEFS = {
                   def: 'Revenue (' + P.accounting + ', ' + KIT_CONFIG.taxLabel + ') ÷ transactions (' + P.pos + ')',
                   decision: 'Are upsells and pricing working? Move it with specials, bundles and staff prompts.' },
   cogs:         { label: 'Cost of goods', fmt: 'money', dual: true, needs: ['accounting'], goodDir: 'down',
-                  def: 'Everything in your Cost of Sales accounts, ' + KIT_CONFIG.taxLabel + ' · from ' + P.accounting,
+                  def: 'Your Cost of Sales accounts plus Hospitality Supplies - Rocky Creek, ' + KIT_CONFIG.taxLabel + ' · from ' + P.accounting + ' · differs from the standard definition (Cost of Sales only)',
                   decision: 'Rising as a share of revenue? Check supplier prices, portioning and waste.' },
   wage:         { label: 'Wage %', fmt: 'pct', dual: true, needs: ['accounting'], goodDir: 'down',
                   def: 'Wages plus super ÷ revenue · from ' + P.accounting,

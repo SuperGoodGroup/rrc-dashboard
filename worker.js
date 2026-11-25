@@ -37,12 +37,23 @@ import dashboardHtml from './dashboard.html';
    Flip `configured: true` per source as you wire it. Until then the
    dashboard honestly shows "not configured" (never a fake zero).
 ---------------------------------------------------------------------------- */
-/* ---------------- Xero helpers (accounting adapter) ---------------- */
 /* The owner's confirmed wage + super accounts, matched by exact name (case and spacing ignored).
    Anything not listed here stays in Overheads. Edit this list if the owner's chart changes. */
+/* OWNER OVERRIDES of the kit's default definitions. Each list is matched by exact account name
+   (case, spacing and dash style ignored). The dashboard labels these as deviations.
+   - Revenue: ONLY these Income lines (kit default: the whole Income section, ex Other Income).
+   - Wages + super: ONLY these Operating Expenses lines (confirmed with the owner).
+   - Cost of goods: the whole Cost of Sales section PLUS these Operating Expenses lines, which then
+     leave Overheads. Anything else in Operating Expenses stays in Overheads. */
+function plNorm(s) { return String(s === undefined || s === null ? '' : s).toLowerCase().replace(/[\u2010-\u2015\u2212]/g, '-').replace(/\s+/g, ' ').trim(); }
+const XERO_REVENUE_ACCOUNTS = ['Sales Rocky Creek'];
 const XERO_WAGE_ACCOUNTS = ['Wages Rocky Creek', 'Superannuation Rocky Creek'];
-const XERO_WAGE_SET = new Set(XERO_WAGE_ACCOUNTS.map(function (n) { return n.toLowerCase().replace(/\s+/g, ' ').trim(); }));
+const XERO_COGS_EXTRA_ACCOUNTS = ['Hospitality Supplies - Rocky Creek'];
+const XERO_REVENUE_SET = new Set(XERO_REVENUE_ACCOUNTS.map(plNorm));
+const XERO_WAGE_SET = new Set(XERO_WAGE_ACCOUNTS.map(plNorm));
+const XERO_COGS_EXTRA_SET = new Set(XERO_COGS_EXTRA_ACCOUNTS.map(plNorm));
 
+/* ---------------- Xero helpers (accounting adapter) ---------------- */
 async function xeroTenant(h) {
   const t = await h.getTokens();
   if (t && t.tenantId) return { id: t.tenantId, name: t.tenantName || '' };
@@ -81,14 +92,20 @@ function parsePL(report, ncols) {
     const inner = sec.Rows || [];
     const summary = inner.find((r) => r.RowType === 'SummaryRow');
     for (let c = 0; c < ncols; c++) {
-      const total = summary
-        ? plNum(summary.Cells, c + 1)
-        : inner.filter((r) => r.RowType === 'Row').reduce((s, r) => s + plNum(r.Cells, c + 1), 0);
+      const total = kind === 'revenue'
+        ? inner.filter((r) => r.RowType === 'Row' && r.Cells && r.Cells[0] && XERO_REVENUE_SET.has(plNorm(r.Cells[0].Value)))
+            .reduce((s, r) => s + plNum(r.Cells, c + 1), 0)
+        : summary
+          ? plNum(summary.Cells, c + 1)
+          : inner.filter((r) => r.RowType === 'Row').reduce((s, r) => s + plNum(r.Cells, c + 1), 0);
       out[kind][c] += total;
       if (kind === 'opex') {
         for (const r of inner) {
           const label = (r.RowType === 'Row' && r.Cells && r.Cells[0] && r.Cells[0].Value) || '';
-          if (label && XERO_WAGE_SET.has(String(label).toLowerCase().replace(/\s+/g, ' ').trim())) out.wages[c] += plNum(r.Cells, c + 1);
+          if (!label) continue;
+          const key = plNorm(label);
+          if (XERO_WAGE_SET.has(key)) out.wages[c] += plNum(r.Cells, c + 1);
+          else if (XERO_COGS_EXTRA_SET.has(key)) { const v = plNum(r.Cells, c + 1); out.cogs[c] += v; out.opex[c] -= v; }
         }
       }
     }
