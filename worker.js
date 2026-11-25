@@ -565,7 +565,9 @@ async function authCallback(env, source, url) {
     redirect_uri: redirectUri
   }, env));
   if (!res.ok) {
-    return new Response('The connection couldn’t be finished (the tool said no: ' + res.status + '). Your AI will check the app settings - the usual cause is a redirect address that doesn’t match exactly.', { status: 502 });
+    let why = '';
+    try { const eb = await res.json(); why = String(eb.error || '') + (eb.error_description ? ' - ' + String(eb.error_description) : ''); } catch (e) { /* no body */ }
+    return new Response('The connection couldn’t be finished (the tool said no: ' + res.status + (why ? ', reason: ' + why : '') + '). Take a screenshot of this and show your AI - it tells them exactly what to fix.', { status: 502 });
   }
   const t = await res.json();
   await saveTokens(env, source, {
